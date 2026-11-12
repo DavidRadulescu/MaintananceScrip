@@ -1,7 +1,6 @@
 <#
 .SYNOPSIS
     Windows health check and maintenance.
-
 .DESCRIPTION
     Flow:
       1. System state     OS version, uptime
@@ -17,22 +16,16 @@
      11. Summary          table, CSV report, exit code (0 OK, 1 WARN, 2 FAIL)
 
     Without switches it only reports. Run as Administrator in Windows PowerShell 5.1.
-
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1
-
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -CreateRestorePoint -UpdateDefender -UpdateApps -CleanTemp
-
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -CleanTemp -OptimizeDrives
-
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -InstallWindowsUpdates -OptimizeDrives -WhatIf
-
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -Repair
-
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -BackupPath 'D:\Backups' -BackupMaxAgeDays 3
 #>
@@ -48,7 +41,6 @@ param(
     [switch]$CleanComponentStore,
     [switch]$OptimizeDrives,
     [switch]$Repair,
-
     [string]$BackupPath,
     [int]$BackupMaxAgeDays      = 7,
     [int]$TempMaxAgeDays        = 7,
@@ -60,11 +52,9 @@ param(
     [int]$LogRetentionDays      = 60,
     [string]$LogDir             = (Join-Path $env:ProgramData 'WinMaintenance')
 )
-
 $script:Findings = New-Object System.Collections.Generic.List[object]
 $script:Cmdlet   = $PSCmdlet
 $script:UpdateRebootRequired = $false
-
 function Add-Finding {
     param(
         [string]$Area,
@@ -75,7 +65,6 @@ function Add-Finding {
     $colors = @{ OK = 'Green'; INFO = 'Gray'; WARN = 'Yellow'; FAIL = 'Red' }
     Write-Host ('[{0,-4}] {1}: {2}' -f $Status, $Area, $Detail) -ForegroundColor $colors[$Status]
 }
-
 function Invoke-Check {
     param([string]$Name, [scriptblock]$Body)
     try {
@@ -88,20 +77,16 @@ function Invoke-Check {
         Add-Finding $Name 'WARN' "Check could not run: $($_.Exception.Message)"
     }
 }
-
 function Confirm-Action {
     param([string]$Target, [string]$Action)
     $script:Cmdlet.ShouldProcess($Target, $Action)
 }
-
 New-Item -ItemType Directory -Path $LogDir -Force -WhatIf:$false | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 Start-Transcript -Path (Join-Path $LogDir "maintenance-$stamp.log") -WhatIf:$false | Out-Null
-
 try {
     Write-Host "Windows maintenance on $env:COMPUTERNAME, $(Get-Date)" -ForegroundColor Cyan
     if ($WhatIfPreference) { Write-Host 'WhatIf mode: no changes will be made.' -ForegroundColor Cyan }
-
     Invoke-Check 'OS version' {
         $os = Get-CimInstance Win32_OperatingSystem
         $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -113,7 +98,6 @@ try {
             Add-Finding 'OS version' 'INFO' $detail
         }
     }
-
     Invoke-Check 'Uptime' {
         $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
         $days = [math]::Round(((Get-Date) - $boot).TotalDays, 1)
@@ -124,7 +108,6 @@ try {
             Add-Finding 'Uptime' 'OK' "$days days since last restart"
         }
     }
-
     Invoke-Check 'Restore point' {
         if ($CreateRestorePoint -and (Confirm-Action 'System Restore' 'Create restore point')) {
             Checkpoint-Computer -Description "Maintenance $(Get-Date -Format 'yyyy-MM-dd')" `
@@ -140,7 +123,6 @@ try {
         $age = [math]::Round(((Get-Date) - $created).TotalDays, 1)
         Add-Finding 'Restore point' 'OK' "Latest: '$($latest.Description)' ($age days ago)"
     }
-
     Invoke-Check 'Windows Update' {
         $au = New-Object -ComObject Microsoft.Update.AutoUpdate
         $lastOk = $au.Results.LastInstallationSuccessDate
@@ -149,20 +131,16 @@ try {
             $status = if ($since -gt $MaxDaysSinceWUInstall) { 'WARN' } else { 'OK' }
             Add-Finding 'Windows Update' $status "Last successful install $since days ago"
         }
-
         Write-Host 'Searching for Windows updates (can take a few minutes)...'
         $session  = New-Object -ComObject Microsoft.Update.Session
         $searcher = $session.CreateUpdateSearcher()
         $result   = $searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
-
         if ($result.Updates.Count -eq 0) {
             Add-Finding 'Windows Update' 'OK' 'No pending updates'
             return
         }
-
         $titles = foreach ($u in $result.Updates) { $u.Title }
         Add-Finding 'Windows Update' 'WARN' "$($result.Updates.Count) pending: $($titles -join '; ')"
-
         if ($InstallWindowsUpdates -and (Confirm-Action "$($result.Updates.Count) Windows update(s)" 'Download and install')) {
             $collection = New-Object -ComObject Microsoft.Update.UpdateColl
             foreach ($u in $result.Updates) {
@@ -173,18 +151,15 @@ try {
             $downloader = $session.CreateUpdateDownloader()
             $downloader.Updates = $collection
             [void]$downloader.Download()
-
             Write-Host 'Installing updates...'
             $installer = $session.CreateUpdateInstaller()
             $installer.Updates = $collection
             $install = $installer.Install()
-
             $script:UpdateRebootRequired = $install.RebootRequired
             $status = if ($install.ResultCode -eq 2) { 'OK' } else { 'FAIL' }
             Add-Finding 'Windows Update' $status "Install result code $($install.ResultCode); restart required: $($install.RebootRequired)"
         }
     }
-
     Invoke-Check 'Defender' {
         $mp = Get-MpComputerStatus
         if ($mp.AMRunningMode -and $mp.AMRunningMode -ne 'Normal') {
@@ -195,7 +170,6 @@ try {
             Update-MpSignature
             $mp = Get-MpComputerStatus
         }
-
         if (-not $mp.RealTimeProtectionEnabled) {
             Add-Finding 'Defender' 'FAIL' 'Real-time protection is OFF'
         }
@@ -206,13 +180,11 @@ try {
         $status = if ($sigAge -gt 3) { 'WARN' } else { 'OK' }
         Add-Finding 'Defender' $status "Real-time protection: $($mp.RealTimeProtectionEnabled); signatures $sigAge day(s) old"
     }
-
     Invoke-Check 'App updates' {
         if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
             Add-Finding 'App updates' 'WARN' 'winget not found (common when running as SYSTEM)'
             return
         }
-
         if ($UpdateApps -and (Confirm-Action 'All winget-managed apps' 'Upgrade')) {
             & winget.exe upgrade --all --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
             $status = if ($LASTEXITCODE -eq 0) { 'OK' } else { 'WARN' }
@@ -229,7 +201,6 @@ try {
             }
         }
     }
-
     if ($CleanTemp) {
         Invoke-Check 'Temp cleanup' {
             $cutoff = (Get-Date).AddDays(-$TempMaxAgeDays)
@@ -242,10 +213,8 @@ try {
                 Add-Finding 'Temp cleanup' 'OK' "Nothing older than $TempMaxAgeDays days"
                 return
             }
-
             $totalMB = [math]::Round(($files | Measure-Object Length -Sum).Sum / 1MB, 1)
             if (-not (Confirm-Action "$($files.Count) temp files ($totalMB MB)" 'Delete')) { return }
-
             $freed = 0; $skipped = 0
             foreach ($f in $files) {
                 try {
@@ -259,7 +228,6 @@ try {
             Add-Finding 'Temp cleanup' 'OK' ('Freed {0} MB; {1} file(s) skipped because they were in use' -f [math]::Round($freed / 1MB, 1), $skipped)
         }
     }
-
     if ($CleanComponentStore) {
         Invoke-Check 'Component store' {
             if (-not (Confirm-Action 'Component store (WinSxS)' 'Remove superseded components')) { return }
@@ -288,7 +256,6 @@ try {
                     'HDD'   { 'defragment' }
                     default { 'default operation for its media type' }
                 }
-
                 if (-not (Confirm-Action "Volume $($letter): ($media)" "Optimize ($operation)")) { continue }
                 Write-Host "Optimizing $($letter): ($media, $operation)..."
                 try {
@@ -305,20 +272,17 @@ try {
     if ($Repair) {
         Invoke-Check 'System repair' {
             if (-not (Confirm-Action 'Windows image and system files' 'DISM RestoreHealth, then SFC')) { return }
-
             Write-Host 'Running DISM /RestoreHealth (can take 10-30 minutes)...'
             & dism.exe /Online /Cleanup-Image /RestoreHealth
             if ($LASTEXITCODE -ne 0) {
                 Add-Finding 'System repair' 'FAIL' "DISM failed (exit $LASTEXITCODE); SFC skipped. See $env:SystemRoot\Logs\DISM\dism.log"
                 return
             }
-
             Write-Host 'Running SFC /scannow...'
             & sfc.exe /scannow
             Add-Finding 'System repair' 'INFO' "DISM succeeded; SFC exit code $LASTEXITCODE. Details in $env:SystemRoot\Logs\CBS\CBS.log"
         }
     }
-
     Invoke-Check 'Disk space' {
         $volumes = Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter -and $_.Size -gt 0 }
         foreach ($v in $volumes) {
@@ -328,7 +292,6 @@ try {
             Add-Finding "Disk $($v.DriveLetter):" $status "$freeGB GB free ($pct%)"
         }
     }
-
     Invoke-Check 'Disk health' {
         foreach ($d in Get-PhysicalDisk) {
             $rel   = $d | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
@@ -343,7 +306,6 @@ try {
             Add-Finding 'Disk health' $status "$($d.FriendlyName) [$($d.MediaType)] - $($notes -join ', ')"
         }
     }
-
     Invoke-Check 'Optimize schedule' {
         $task = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName 'ScheduledDefrag' -ErrorAction SilentlyContinue
         if (-not $task) {
@@ -354,13 +316,11 @@ try {
             Add-Finding 'Optimize schedule' 'WARN' 'Scheduled drive optimization is disabled (run with -OptimizeDrives, or re-enable it in "Defragment and Optimize Drives")'
             return
         }
-
         $info = $task | Get-ScheduledTaskInfo
         if (-not $info.LastRunTime -or $info.LastRunTime -lt [datetime]'2000-01-01') {
             Add-Finding 'Optimize schedule' 'WARN' 'Enabled, but has never run'
             return
         }
-
         $days = [math]::Round(((Get-Date) - $info.LastRunTime).TotalDays)
         $code = '0x{0:X}' -f $info.LastTaskResult
         if ($info.LastTaskResult -eq 0x41301) {
@@ -376,7 +336,6 @@ try {
             Add-Finding 'Optimize schedule' 'OK' "Enabled; last ran $days day(s) ago and succeeded"
         }
     }
-
     Invoke-Check 'BitLocker' {
         $bl = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
         if ($bl.ProtectionStatus -ne 'On') {
@@ -389,7 +348,6 @@ try {
             Add-Finding 'BitLocker' 'OK' 'Protected; recovery password exists (make sure it is stored off this machine)'
         }
     }
-
     Invoke-Check 'Secure Boot' {
         $sb = $null
         try { $sb = Confirm-SecureBootUEFI -ErrorAction Stop } catch { }
@@ -397,14 +355,12 @@ try {
         elseif ($sb -eq $false) { Add-Finding 'Secure Boot' 'WARN' 'UEFI system, but Secure Boot is disabled' }
         else                    { Add-Finding 'Secure Boot' 'WARN' 'Not supported (legacy BIOS / CSM boot?)' }
     }
-
     Invoke-Check 'TPM' {
         $tpm = Get-Tpm
         if ($tpm.TpmPresent -and $tpm.TpmReady) { Add-Finding 'TPM' 'OK' 'Present and ready' }
         elseif ($tpm.TpmPresent)                { Add-Finding 'TPM' 'WARN' 'Present but not ready' }
         else                                    { Add-Finding 'TPM' 'WARN' 'Not detected (or disabled in firmware)' }
     }
-
     if ($BackupPath) {
         Invoke-Check 'Backup' {
             if (-not (Test-Path -LiteralPath $BackupPath)) {
@@ -425,7 +381,6 @@ try {
     else {
         Add-Finding 'Backup' 'INFO' 'Not checked (pass -BackupPath to verify backups are recent)'
     }
-
     Invoke-Check 'Event log' {
         $since = (Get-Date).AddDays(-$EventLookbackDays)
         $queries = [ordered]@{
@@ -441,7 +396,6 @@ try {
                 Add-Finding 'Event log' 'WARN' "$label in last $EventLookbackDays days: $($events.Count) (most recent $($events[0].TimeCreated))"
             }
         }
-
         $crashes = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $since } -ErrorAction SilentlyContinue)
         if ($crashes.Count -gt 0) {
             $found = $true
@@ -449,23 +403,19 @@ try {
                 Select-Object -First 3 | ForEach-Object { "$($_.Name) x$($_.Count)" }
             Add-Finding 'Event log' 'INFO' "Application crashes: $($crashes.Count) (top: $($top -join ', '))"
         }
-
         if (-not $found) {
             Add-Finding 'Event log' 'OK' "No shutdowns, hardware/disk errors or app crashes in last $EventLookbackDays days"
         }
     }
-
     Invoke-Check 'Startup items' {
         $names = @(Get-CimInstance Win32_StartupCommand | Select-Object -ExpandProperty Name -Unique)
         Add-Finding 'Startup items' 'INFO' "$($names.Count) registered: $($names -join ', ')"
     }
-
     Invoke-Check 'Pending restart' {
         $reasons = @()
         if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $reasons += 'Windows servicing' }
         if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $reasons += 'Windows Update' }
         if ($script:UpdateRebootRequired) { $reasons += 'updates installed this run' }
-
         if ($reasons) { Add-Finding 'Pending restart' 'WARN' "Restart needed: $($reasons -join ', ')" }
         else          { Add-Finding 'Pending restart' 'OK' 'No restart pending' }
     }
@@ -476,20 +426,16 @@ finally {
         Write-Host "`n=================== Summary ===================" -ForegroundColor Cyan
         $script:Findings | Sort-Object { $order[$_.Status] } |
             Format-Table Status, Area, Detail -AutoSize -Wrap | Out-Host
-
         $csv = Join-Path $LogDir "report-$stamp.csv"
         $script:Findings | Export-Csv -Path $csv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
         Write-Host "Report saved to $csv"
     }
-
     Get-ChildItem -Path $LogDir -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$LogRetentionDays) } |
         Remove-Item -Force -ErrorAction SilentlyContinue
-
     $WhatIfPreference = $false
     Stop-Transcript | Out-Null
 }
-
 $statuses = @($script:Findings | ForEach-Object { $_.Status })
 if ($statuses -contains 'FAIL')     { exit 2 }
 elseif ($statuses -contains 'WARN') { exit 1 }
