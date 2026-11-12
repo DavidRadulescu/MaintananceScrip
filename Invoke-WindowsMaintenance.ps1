@@ -3,75 +3,68 @@
     Windows health check and maintenance.
 
 .DESCRIPTION
-    Runs read-only health checks by default and prints a summary report.
-    Anything that changes the system only runs when you pass its switch,
-    and every change honours -WhatIf and -Confirm.
+    Flow:
+      1. System state     OS version, uptime
+      2. Safety net       restore point                  -CreateRestorePoint
+      3. Updates          Windows Update, Defender, apps  -InstallWindowsUpdates -UpdateDefender -UpdateApps
+      4. Cleanup          temp files, component store    -CleanTemp -CleanComponentStore
+      5. Optimize         defrag HDDs, retrim SSDs       -OptimizeDrives
+      6. Repair           DISM, then SFC                 -Repair
+      7. Storage          free space, disk health, optimization schedule
+      8. Security         BitLocker, Secure Boot, TPM
+      9. Backup           age of newest file in -BackupPath
+     10. Diagnostics      event log, startup items, pending restart
+     11. Summary          table, CSV report, exit code (0 OK, 1 WARN, 2 FAIL)
 
-    Written for Windows PowerShell 5.1 (the one built into Windows), run as
-    Administrator. Some cmdlets used here (Get-ComputerRestorePoint,
-    Checkpoint-Computer) do not exist in PowerShell 7.
-
-    A transcript and a CSV report are written to %ProgramData%\WinMaintenance.
-    Output from native tools (DISM, SFC, winget) goes to the console and to
-    their own logs rather than into the transcript.
-
-    Exit codes: 0 = everything OK, 1 = warnings, 2 = failures.
-    That makes it usable from Task Scheduler, an RMM tool or an Intune
-    remediation script, which all key off the exit code.
+    Without switches it only reports. Run as Administrator in Windows PowerShell 5.1.
 
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1
-    Report only. Changes nothing.
 
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -CreateRestorePoint -UpdateDefender -UpdateApps -CleanTemp
-    A typical weekly run.
 
 .EXAMPLE
-    .\Invoke-WindowsMaintenance.ps1 -InstallWindowsUpdates -CleanTemp -WhatIf
-    Show what would be installed and deleted without doing it.
+    .\Invoke-WindowsMaintenance.ps1 -CleanTemp -OptimizeDrives
+
+.EXAMPLE
+    .\Invoke-WindowsMaintenance.ps1 -InstallWindowsUpdates -OptimizeDrives -WhatIf
 
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -Repair
-    DISM RestoreHealth followed by SFC, for when something is actually broken.
 
 .EXAMPLE
     .\Invoke-WindowsMaintenance.ps1 -BackupPath 'D:\Backups' -BackupMaxAgeDays 3
-    Also verify that the backup destination received new files recently.
 #>
 #Requires -RunAsAdministrator
 #Requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    # --- actions (all off by default) ---
     [switch]$CreateRestorePoint,
     [switch]$InstallWindowsUpdates,
     [switch]$UpdateDefender,
     [switch]$UpdateApps,
     [switch]$CleanTemp,
     [switch]$CleanComponentStore,
+    [switch]$OptimizeDrives,
     [switch]$Repair,
 
-    # --- thresholds and options ---
     [string]$BackupPath,
-    [int]$BackupMaxAgeDays  = 7,
-    [int]$TempMaxAgeDays    = 7,
-    [int]$MinFreePercent    = 15,
-    [int]$MaxUptimeDays     = 7,
+    [int]$BackupMaxAgeDays      = 7,
+    [int]$TempMaxAgeDays        = 7,
+    [int]$MinFreePercent        = 15,
+    [int]$MaxUptimeDays         = 7,
     [int]$MaxDaysSinceWUInstall = 35,
-    [int]$EventLookbackDays = 7,
-    [int]$LogRetentionDays  = 60,
-    [string]$LogDir         = (Join-Path $env:ProgramData 'WinMaintenance')
+    [int]$MaxDaysSinceOptimize  = 35,
+    [int]$EventLookbackDays     = 7,
+    [int]$LogRetentionDays      = 60,
+    [string]$LogDir             = (Join-Path $env:ProgramData 'WinMaintenance')
 )
-
-# =============================================================== helpers ===
 
 $script:Findings = New-Object System.Collections.Generic.List[object]
 $script:Cmdlet   = $PSCmdlet
 $script:UpdateRebootRequired = $false
 
-# Every check reports through this, so the summary, the CSV and the exit
-# code all come from one list.
 function Add-Finding {
     param(
         [string]$Area,
@@ -83,15 +76,12 @@ function Add-Finding {
     Write-Host ('[{0,-4}] {1}: {2}' -f $Status, $Area, $Detail) -ForegroundColor $colors[$Status]
 }
 
-# Runs one check in isolation. If it throws, that is recorded and the run
-# carries on, so one broken check never hides the results of the others.
 function Invoke-Check {
     param([string]$Name, [scriptblock]$Body)
     try {
         & $Body
     }
     catch [System.Management.Automation.CommandNotFoundException] {
-        # e.g. BitLocker cmdlets on Windows Home: not a problem, just not applicable
         Add-Finding $Name 'INFO' "Not available on this system ($($_.Exception.CommandName))"
     }
     catch {
@@ -99,18 +89,11 @@ function Invoke-Check {
     }
 }
 
-# Gate for anything that changes the system. Going through ShouldProcess
-# means -WhatIf and -Confirm also cover external tools (DISM, winget),
-# not only PowerShell cmdlets that support them natively.
 function Confirm-Action {
     param([string]$Target, [string]$Action)
     $script:Cmdlet.ShouldProcess($Target, $Action)
 }
 
-# ================================================================= setup ===
-
-# -WhatIf:$false here because -WhatIf would otherwise also suppress our own
-# logging, which is exactly when you want to see what would have happened.
 New-Item -ItemType Directory -Path $LogDir -Force -WhatIf:$false | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 Start-Transcript -Path (Join-Path $LogDir "maintenance-$stamp.log") -WhatIf:$false | Out-Null
@@ -119,14 +102,10 @@ try {
     Write-Host "Windows maintenance on $env:COMPUTERNAME, $(Get-Date)" -ForegroundColor Cyan
     if ($WhatIfPreference) { Write-Host 'WhatIf mode: no changes will be made.' -ForegroundColor Cyan }
 
-    # ------------------------------------------------------- system state ---
-
     Invoke-Check 'OS version' {
         $os = Get-CimInstance Win32_OperatingSystem
         $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
         $detail = '{0} {1} (build {2}.{3})' -f $os.Caption, $cv.DisplayVersion, $cv.CurrentBuild, $cv.UBR
-        # ProductType 1 = workstation. Builds below 22000 are Windows 10,
-        # which is out of support without Extended Security Updates.
         if ($os.ProductType -eq 1 -and [int]$cv.CurrentBuild -lt 22000) {
             Add-Finding 'OS version' 'WARN' "$detail - Windows 10 no longer gets security updates unless enrolled in ESU"
         }
@@ -138,7 +117,6 @@ try {
     Invoke-Check 'Uptime' {
         $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
         $days = [math]::Round(((Get-Date) - $boot).TotalDays, 1)
-        # With Fast Startup, "Shut down" does not reset this. Only Restart does.
         if ($days -gt $MaxUptimeDays) {
             Add-Finding 'Uptime' 'WARN' "$days days since last real restart (Fast Startup shutdowns do not count)"
         }
@@ -147,14 +125,8 @@ try {
         }
     }
 
-    # ---------------------------------------------------------- safety net ---
-    # Runs before anything that changes the system, so there is something to
-    # roll back to if an update or driver misbehaves.
-
     Invoke-Check 'Restore point' {
         if ($CreateRestorePoint -and (Confirm-Action 'System Restore' 'Create restore point')) {
-            # Windows skips this silently if a restore point was created in the
-            # last 24 hours (SystemRestorePointCreationFrequency). That is fine.
             Checkpoint-Computer -Description "Maintenance $(Get-Date -Format 'yyyy-MM-dd')" `
                 -RestorePointType MODIFY_SETTINGS -WarningAction SilentlyContinue
         }
@@ -169,11 +141,7 @@ try {
         Add-Finding 'Restore point' 'OK' "Latest: '$($latest.Description)' ($age days ago)"
     }
 
-    # ------------------------------------------------------------ updates ---
-
     Invoke-Check 'Windows Update' {
-        # When updates last installed successfully. A machine whose updates
-        # have silently been failing for months shows up here.
         $au = New-Object -ComObject Microsoft.Update.AutoUpdate
         $lastOk = $au.Results.LastInstallationSuccessDate
         if ($lastOk) {
@@ -182,9 +150,6 @@ try {
             Add-Finding 'Windows Update' $status "Last successful install $since days ago"
         }
 
-        # Uses the Windows Update Agent COM API directly, so no extra module
-        # is needed. It respects WSUS/Intune policy if the machine is managed.
-        # Type='Software' leaves out optional driver updates on purpose.
         Write-Host 'Searching for Windows updates (can take a few minutes)...'
         $session  = New-Object -ComObject Microsoft.Update.Session
         $searcher = $session.CreateUpdateSearcher()
@@ -214,7 +179,6 @@ try {
             $installer.Updates = $collection
             $install = $installer.Install()
 
-            # ResultCode: 2 = succeeded, 3 = succeeded with errors, 4 = failed, 5 = aborted
             $script:UpdateRebootRequired = $install.RebootRequired
             $status = if ($install.ResultCode -eq 2) { 'OK' } else { 'FAIL' }
             Add-Finding 'Windows Update' $status "Install result code $($install.ResultCode); restart required: $($install.RebootRequired)"
@@ -223,8 +187,6 @@ try {
 
     Invoke-Check 'Defender' {
         $mp = Get-MpComputerStatus
-        # If another antivirus is installed, Defender steps back into passive
-        # mode. Its status is then not the one that matters.
         if ($mp.AMRunningMode -and $mp.AMRunningMode -ne 'Normal') {
             Add-Finding 'Defender' 'INFO' "Running in '$($mp.AMRunningMode)' - another antivirus is probably primary"
             return
@@ -246,8 +208,6 @@ try {
     }
 
     Invoke-Check 'App updates' {
-        # winget is installed per user as an app package, so it is usually
-        # missing when this runs as SYSTEM (e.g. from a scheduled task).
         if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
             Add-Finding 'App updates' 'WARN' 'winget not found (common when running as SYSTEM)'
             return
@@ -255,14 +215,10 @@ try {
 
         if ($UpdateApps -and (Confirm-Action 'All winget-managed apps' 'Upgrade')) {
             & winget.exe upgrade --all --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
-            # Non-zero usually means at least one package failed (often an app
-            # that was running, or one whose installer needs interaction).
             $status = if ($LASTEXITCODE -eq 0) { 'OK' } else { 'WARN' }
             Add-Finding 'App updates' $status "winget upgrade --all finished with exit code $LASTEXITCODE"
         }
         else {
-            # Parsing winget's table is fragile (the text is localised), so
-            # this only reads the "N upgrades available" line.
             $out   = & winget.exe upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
             $match = [regex]::Match($out, '(\d+) upgrades? available')
             if ($match.Success) {
@@ -274,13 +230,9 @@ try {
         }
     }
 
-    # ------------------------------------------------------------ cleanup ---
-
     if ($CleanTemp) {
         Invoke-Check 'Temp cleanup' {
             $cutoff = (Get-Date).AddDays(-$TempMaxAgeDays)
-            # Sort-Object -Unique is case-insensitive, so C:\WINDOWS\TEMP and
-            # C:\Windows\Temp (the same folder when running as SYSTEM) collapse.
             $paths = @($env:TEMP, (Join-Path $env:SystemRoot 'Temp')) | Sort-Object -Unique
             $files = @(foreach ($p in $paths) {
                 Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue |
@@ -292,7 +244,6 @@ try {
             }
 
             $totalMB = [math]::Round(($files | Measure-Object Length -Sum).Sum / 1MB, 1)
-            # One confirmation for the whole batch instead of one per file.
             if (-not (Confirm-Action "$($files.Count) temp files ($totalMB MB)" 'Delete')) { return }
 
             $freed = 0; $skipped = 0
@@ -302,7 +253,7 @@ try {
                     $freed += $f.Length
                 }
                 catch {
-                    $skipped++   # in use by a running program: leave it alone
+                    $skipped++
                 }
             }
             Add-Finding 'Temp cleanup' 'OK' ('Freed {0} MB; {1} file(s) skipped because they were in use' -f [math]::Round($freed / 1MB, 1), $skipped)
@@ -312,22 +263,49 @@ try {
     if ($CleanComponentStore) {
         Invoke-Check 'Component store' {
             if (-not (Confirm-Action 'Component store (WinSxS)' 'Remove superseded components')) { return }
-            # Deliberately NOT /ResetBase: that would make every currently
-            # installed update impossible to uninstall.
             & dism.exe /Online /Cleanup-Image /StartComponentCleanup
             $status = if ($LASTEXITCODE -eq 0) { 'OK' } else { 'WARN' }
             Add-Finding 'Component store' $status "DISM StartComponentCleanup exit code $LASTEXITCODE"
         }
     }
 
-    # ------------------------------------------------------------- repair ---
+    if ($OptimizeDrives) {
+        Invoke-Check 'Optimize drives' {
+            $volumes = Get-Volume | Where-Object {
+                $_.DriveType -eq 'Fixed' -and $_.DriveLetter -and $_.FileSystemType -in 'NTFS', 'ReFS', 'FAT32', 'exFAT'
+            }
+            foreach ($v in $volumes) {
+                $letter = $v.DriveLetter
+                $media = 'Unknown'
+                try {
+                    $diskNumber = (Get-Partition -DriveLetter $letter -ErrorAction Stop).DiskNumber
+                    $physical = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq "$diskNumber" }
+                    if ($physical) { $media = "$($physical.MediaType)" }
+                }
+                catch { }
+                $operation = switch ($media) {
+                    'SSD'   { 'retrim' }
+                    'HDD'   { 'defragment' }
+                    default { 'default operation for its media type' }
+                }
+
+                if (-not (Confirm-Action "Volume $($letter): ($media)" "Optimize ($operation)")) { continue }
+                Write-Host "Optimizing $($letter): ($media, $operation)..."
+                try {
+                    Optimize-Volume -DriveLetter $letter -ErrorAction Stop -WhatIf:$false -Confirm:$false
+                    Add-Finding 'Optimize drives' 'OK' "$($letter): $media - $operation completed"
+                }
+                catch {
+                    Add-Finding 'Optimize drives' 'WARN' "$($letter): $($_.Exception.Message)"
+                }
+            }
+        }
+    }
 
     if ($Repair) {
         Invoke-Check 'System repair' {
             if (-not (Confirm-Action 'Windows image and system files' 'DISM RestoreHealth, then SFC')) { return }
 
-            # Order matters: SFC repairs files from the component store, so the
-            # store has to be healthy first or SFC "repairs" from a bad source.
             Write-Host 'Running DISM /RestoreHealth (can take 10-30 minutes)...'
             & dism.exe /Online /Cleanup-Image /RestoreHealth
             if ($LASTEXITCODE -ne 0) {
@@ -340,9 +318,6 @@ try {
             Add-Finding 'System repair' 'INFO' "DISM succeeded; SFC exit code $LASTEXITCODE. Details in $env:SystemRoot\Logs\CBS\CBS.log"
         }
     }
-
-    # ------------------------------------------------------------ storage ---
-    # After cleanup, so the numbers reflect what was freed.
 
     Invoke-Check 'Disk space' {
         $volumes = Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter -and $_.Size -gt 0 }
@@ -369,7 +344,38 @@ try {
         }
     }
 
-    # ----------------------------------------------------------- security ---
+    Invoke-Check 'Optimize schedule' {
+        $task = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName 'ScheduledDefrag' -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Add-Finding 'Optimize schedule' 'WARN' 'ScheduledDefrag task not found - drives are not optimized automatically'
+            return
+        }
+        if ($task.State -eq 'Disabled') {
+            Add-Finding 'Optimize schedule' 'WARN' 'Scheduled drive optimization is disabled (run with -OptimizeDrives, or re-enable it in "Defragment and Optimize Drives")'
+            return
+        }
+
+        $info = $task | Get-ScheduledTaskInfo
+        if (-not $info.LastRunTime -or $info.LastRunTime -lt [datetime]'2000-01-01') {
+            Add-Finding 'Optimize schedule' 'WARN' 'Enabled, but has never run'
+            return
+        }
+
+        $days = [math]::Round(((Get-Date) - $info.LastRunTime).TotalDays)
+        $code = '0x{0:X}' -f $info.LastTaskResult
+        if ($info.LastTaskResult -eq 0x41301) {
+            Add-Finding 'Optimize schedule' 'INFO' 'Enabled; currently running'
+        }
+        elseif ($info.LastTaskResult -ne 0) {
+            Add-Finding 'Optimize schedule' 'WARN' "Enabled; last run $days day(s) ago ended with $code (often it was only interrupted because the PC stopped being idle)"
+        }
+        elseif ($days -gt $MaxDaysSinceOptimize) {
+            Add-Finding 'Optimize schedule' 'WARN' "Enabled, but last ran $days days ago"
+        }
+        else {
+            Add-Finding 'Optimize schedule' 'OK' "Enabled; last ran $days day(s) ago and succeeded"
+        }
+    }
 
     Invoke-Check 'BitLocker' {
         $bl = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
@@ -399,10 +405,6 @@ try {
         else                                    { Add-Finding 'TPM' 'WARN' 'Not detected (or disabled in firmware)' }
     }
 
-    # ------------------------------------------------------------- backup ---
-    # Backup tools differ too much to query generically, but "did new files
-    # land in the destination recently?" works for almost all of them.
-
     if ($BackupPath) {
         Invoke-Check 'Backup' {
             if (-not (Test-Path -LiteralPath $BackupPath)) {
@@ -424,8 +426,6 @@ try {
         Add-Finding 'Backup' 'INFO' 'Not checked (pass -BackupPath to verify backups are recent)'
     }
 
-    # -------------------------------------------------------- diagnostics ---
-
     Invoke-Check 'Event log' {
         $since = (Get-Date).AddDays(-$EventLookbackDays)
         $queries = [ordered]@{
@@ -435,7 +435,6 @@ try {
         }
         $found = $false
         foreach ($label in $queries.Keys) {
-            # Get-WinEvent throws when nothing matches; SilentlyContinue turns that into "none".
             $events = @(Get-WinEvent -FilterHashtable $queries[$label] -ErrorAction SilentlyContinue)
             if ($events.Count -gt 0) {
                 $found = $true
@@ -457,15 +456,10 @@ try {
     }
 
     Invoke-Check 'Startup items' {
-        # Covers Run keys and Startup folders. Scheduled tasks and services are
-        # not included, and items disabled in Task Manager may still be listed.
         $names = @(Get-CimInstance Win32_StartupCommand | Select-Object -ExpandProperty Name -Unique)
         Add-Finding 'Startup items' 'INFO' "$($names.Count) registered: $($names -join ', ')"
     }
 
-    # Last, so it reflects anything installed during this run.
-    # PendingFileRenameOperations is deliberately not checked: many installers
-    # leave entries there, so it reports a pending restart almost constantly.
     Invoke-Check 'Pending restart' {
         $reasons = @()
         if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $reasons += 'Windows servicing' }
@@ -488,11 +482,11 @@ finally {
         Write-Host "Report saved to $csv"
     }
 
-    # Housekeeping: remove this script's own logs past the retention period.
     Get-ChildItem -Path $LogDir -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$LogRetentionDays) } |
         Remove-Item -Force -ErrorAction SilentlyContinue
 
+    $WhatIfPreference = $false
     Stop-Transcript | Out-Null
 }
 

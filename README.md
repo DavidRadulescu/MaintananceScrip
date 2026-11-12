@@ -75,6 +75,9 @@ All of these are written for Option 2. For Option 1, put the same switches after
 # Ask before each action
 .\Invoke-WindowsMaintenance.ps1 -UpdateApps -CleanTemp -Confirm
 
+# Clean up, then optimize drives (defrag HDDs, retrim SSDs)
+.\Invoke-WindowsMaintenance.ps1 -CleanTemp -OptimizeDrives
+
 # Repair system files when something is actually broken (DISM, then SFC; 10-30 minutes)
 .\Invoke-WindowsMaintenance.ps1 -Repair
 
@@ -94,6 +97,7 @@ All of these are written for Option 2. For Option 1, put the same switches after
 | `-UpdateApps` | Runs `winget upgrade --all` silently |
 | `-CleanTemp` | Deletes temp files older than `-TempMaxAgeDays` from the user and Windows temp folders |
 | `-CleanComponentStore` | Runs `DISM /StartComponentCleanup` (without `/ResetBase`, so installed updates stay uninstallable) |
+| `-OptimizeDrives` | Runs `Optimize-Volume` on every fixed drive: defragments HDDs, sends TRIM (retrim) to SSDs |
 | `-Repair` | Runs `DISM /RestoreHealth`, then `sfc /scannow` |
 
 ### Options
@@ -106,6 +110,7 @@ All of these are written for Option 2. For Option 1, put the same switches after
 | `-MinFreePercent` | 15 | Drives with less free space → WARN |
 | `-MaxUptimeDays` | 7 | Longer since the last restart → WARN |
 | `-MaxDaysSinceWUInstall` | 35 | Longer since the last successful Windows Update install → WARN |
+| `-MaxDaysSinceOptimize` | 35 | Longer since Windows' scheduled drive optimization last ran → WARN |
 | `-EventLookbackDays` | 7 | How far back to look in the event logs |
 | `-LogRetentionDays` | 60 | The script's own logs older than this are deleted |
 | `-LogDir` | `%ProgramData%\WinMaintenance` | Where logs and reports are written |
@@ -114,7 +119,7 @@ All of these are written for Option 2. For Option 1, put the same switches after
 
 - **System:** OS version and Windows 10 end-of-support warning, days since the last real restart
 - **Updates:** pending Windows updates and the date of the last successful install, Defender status and signature age, available winget app upgrades
-- **Storage:** free space on each drive, physical disk health, SSD wear, uncorrected read errors
+- **Storage:** free space on each drive, physical disk health, SSD wear, uncorrected read errors, whether Windows' scheduled drive optimization is enabled and running successfully
 - **Security:** BitLocker and recovery key, Secure Boot, TPM
 - **Backups:** age of the newest file at `-BackupPath`
 - **Diagnostics:** unexpected shutdowns, hardware (WHEA) and disk errors, most frequently crashing apps, startup items, pending restart
@@ -157,6 +162,7 @@ Change `C:\Scripts\` to wherever you keep the script. Two things behave differen
 ## Notes
 
 - **The script never restarts the machine.** It reports when a restart is needed.
+- **`-OptimizeDrives` is usually not needed.** Windows optimizes drives weekly on its own (the `ScheduledDefrag` task), and the script checks that this schedule works. Use the switch when that schedule is off, or after a large cleanup. It never defragments an SSD: `Optimize-Volume` picks the operation from the drive type. Defragmenting a large HDD can take a long time.
 - **Close apps before `-UpdateApps`.** An installer usually can't replace files a running program has open.
 - **"Installer hash does not match"** from winget means the downloaded installer isn't the file the winget catalog expects, usually because the vendor replaced it at the same URL. winget skips that package and continues. Run `winget source update` and try again in a day or two, or update that app through its own updater.
 - **The Windows Update step doesn't work over remote PowerShell** (`Enter-PSSession`). Run it locally or as a scheduled task.
